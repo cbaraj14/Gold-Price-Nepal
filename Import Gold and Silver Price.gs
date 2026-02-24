@@ -51,6 +51,9 @@ var CONFIG = {
 
 
 function update_gold_silver_prices() {
+  // Ensure daily trigger exists (auto-creates if missing)
+  ensure_daily_trigger_();
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ensure_rates_sheet_(ss, CONFIG.sheet_name);
 
@@ -401,6 +404,23 @@ function log_debug_snippet_(html) {
 
 
 /* -------- TRIGGER -------- */
+function ensure_daily_trigger_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  var triggerExists = false;
+  
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "update_gold_silver_prices") {
+      triggerExists = true;
+      break;
+    }
+  }
+  
+  if (!triggerExists) {
+    create_daily_trigger_();
+  }
+}
+
+
 function create_daily_trigger_() {
   // Deletes existing triggers for update_gold_silver_prices, then creates a new one
   var triggers = ScriptApp.getProjectTriggers();
