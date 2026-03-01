@@ -1,5 +1,8 @@
 /***** CONFIG (EDIT THIS ONLY) *****/
 var CONFIG = {
+  // ⬇️ IN THIS LINE — paste your actual spreadsheet ID
+  spreadsheet_id: "PASTE_YOUR_SPREADSHEET_ID_HERE",
+  
   source_urls: [
     "https://www.fngsgja.org.np/",
     "https://www.fenegosida.org/",
@@ -13,8 +16,8 @@ var CONFIG = {
   insert_at_row_number: 2,
 
   trigger: {
-    hour: 11,
-    minute: 15
+    hour: 10,
+    minute: 45
   },
 
   // Sheet headers (customizable)
@@ -53,8 +56,16 @@ var CONFIG = {
 function update_gold_silver_prices() {
   // Ensure daily trigger exists (auto-creates if missing)
   ensure_daily_trigger_();
-
+  // ✅ Works from both manual runs AND time-based triggers
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    ss = SpreadsheetApp.openById(CONFIG.spreadsheet_id);
+  }
+  if (!ss) {
+    Logger.log("ERROR: Could not open spreadsheet. Check CONFIG.spreadsheet_id.");
+    return;
+  }
+
   var sheet = ensure_rates_sheet_(ss, CONFIG.sheet_name);
 
   var fetched = fetch_html_with_fallback_(CONFIG.source_urls);
