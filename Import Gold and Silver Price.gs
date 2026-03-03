@@ -1,8 +1,7 @@
 /***** CONFIG (EDIT THIS ONLY) *****/
 var CONFIG = {
-  // ⬇️ IN THIS LINE — paste your actual spreadsheet ID
-  spreadsheet_id: "PASTE_YOUR_SPREADSHEET_ID_HERE",
-  
+  spreadsheet_id: "YOUR_SPREADSHEET_ID_HERE",
+
   source_urls: [
     "https://www.fngsgja.org.np/",
     "https://www.fenegosida.org/",
@@ -11,6 +10,7 @@ var CONFIG = {
   ],
 
   sheet_name: "Rates",
+  log_sheet_name: "Log",
 
   header_row_number: 1,
   insert_at_row_number: 2,
@@ -31,6 +31,33 @@ var CONFIG = {
     "Gold to Silver Ratio"
   ],
 
+  // Log sheet headers
+  log_headers: [
+    "Timestamp",
+    "Status",
+    "Run Type",
+    "Message",
+    "Source URL",
+    "Duration (sec)"
+  ],
+
+  // Maximum log rows to keep (oldest trimmed automatically)
+  max_log_rows: 500,
+
+  // Log status colors
+  log_status_colors: {
+    SUCCESS: "#1a7f37",
+    FAILED: "#d1242f",
+    SKIPPED: "#d29922",
+    ERROR: "#d1242f"
+  },
+
+  // Run type colors
+  log_run_type_colors: {
+    MANUAL: "#6639ba",
+    TRIGGER: "#0969da"
+  },
+
   // Number formats (no decimals)
   number_formats: {
     price_no_decimals: "#,##0",
@@ -38,7 +65,6 @@ var CONFIG = {
   },
 
   // Font colors to indicate change vs last run
-  // Increased = green, Decreased = red, Same = grey (edit colors if you want)
   change_colors: {
     up: "#1a7f37",
     down: "#d1242f",
@@ -53,10 +79,15 @@ var CONFIG = {
 /***** END CONFIG *****/
 
 
-function update_gold_silver_prices() {
+function update_gold_silver_prices(e) {
+  var start_time = new Date();
+
+  // Detect: manual run vs time-based trigger
+  var run_type = (e && e.triggerUid) ? "TRIGGER" : "MANUAL";
+
   // Ensure daily trigger exists (auto-creates if missing)
   ensure_daily_trigger_();
-  // ✅ Works from both manual runs AND time-based triggers
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) {
     ss = SpreadsheetApp.openById(CONFIG.spreadsheet_id);
@@ -67,9 +98,20 @@ function update_gold_silver_prices() {
   }
 
   var sheet = ensure_rates_sheet_(ss, CONFIG.sheet_name);
+  var log_sheet = ensure_log_sheet_(ss, CONFIG.log_sheet_name);
+
+  // ── DUPLICATE DATE GUARD (English date) ──
+  if (is_today_already_recorded_(sheet)) {
+    log_to_sheet_(log_sheet, "SKIPPED", run_type,
+      "Today's English date already has a row. No update needed.", "", start_time);
+    Logger.log("SKIPPED: Today's English date already recorded.");
+    return;
+  }
 
   var fetched = fetch_html_with_fallback_(CONFIG.source_urls);
   if (!fetched || !fetched.html) {
+    log_to_sheet_(log_sheet, "FAILED", run_type,
+      "Failed to fetch HTML from all sources and cache is empty.", "", start_time);
     Logger.log("Failed to fetch HTML from all sources and cache is empty.");
     return;
   }
@@ -79,6 +121,8 @@ function update_gold_silver_prices() {
   if (!parsed) parsed = parse_fngsgja_home_(fetched.html);
 
   if (!parsed) {
+    log_to_sheet_(log_sheet, "FAILED", run_type,
+      "Could not parse rates from fetched HTML.", fetched.url_used, start_time);
     Logger.log("Could not parse rates. Source used: " + fetched.url_used);
     log_debug_snippet_(fetched.html);
     return;
@@ -114,26 +158,119 @@ function update_gold_silver_prices() {
   if (sheet.getLastRow() >= prev_row) {
     apply_change_font_colors_(sheet, insert_row, prev_row);
   } else {
-    // First run: set neutral color for all numeric fields
     set_neutral_font_colors_(sheet, insert_row);
   }
 
+  var message = "Gold/tola=" + parsed.gold_tola
+    + "  Silver/tola=" + parsed.silver_tola
+    + "  Gold/10g=" + parsed.gold_10g
+    + "  Silver/10g=" + parsed.silver_10g
+    + "  Nepali=" + parsed.nepali_date;
+
+  log_to_sheet_(log_sheet, "SUCCESS", run_type, message, fetched.url_used, start_time);
   Logger.log("Success. Source used: " + fetched.url_used);
 }
 
 
+/* -------- DUPLICATE DATE GUARD -------- */
+function is_today_already_recorded_(sheet) {
+  var last_row = sheet.getLastRow();
+  if (last_row < CONFIG.insert_at_row_number) return false;
+
+  var tz = Session.getScriptTimeZone();
+  var today_str = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+
+  var check_count = Math.min(5, last_row - CONFIG.header_row_number);
+  if (check_count <= 0) return false;
+
+  var values = sheet.getRange(CONFIG.insert_at_row_number, 1, check_count, 1).getValues();
+
+  for (var i = 0; i < values.length; i++) {
+    var cell = values[i][0];
+    if (cell instanceof Date) {
+      var cell_str = Utilities.formatDate(cell, tz, "yyyy-MM-dd");
+      if (cell_str === today_str) return true;
+    }
+  }
+
+  return false;
+}
+
+
+/* -------- LOG SHEET -------- */
+function ensure_log_sheet_(ss, sheet_name) {
+  var sheet = ss.getSheetByName(sheet_name);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheet_name);
+    sheet.getRange(1, 1, 1, CONFIG.log_headers.length).setValues([CONFIG.log_headers]);
+    sheet.getRange(1, 1, 1, CONFIG.log_headers.length).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(1, 170); // Timestamp
+    sheet.setColumnWidth(2, 90);  // Status
+    sheet.setColumnWidth(3, 90);  // Run Type
+    sheet.setColumnWidth(4, 480); // Message
+    sheet.setColumnWidth(5, 240); // Source URL
+    sheet.setColumnWidth(6, 110); // Duration
+  }
+  return sheet;
+}
+
+
+function log_to_sheet_(log_sheet, status, run_type, message, source_url, start_time) {
+  if (!log_sheet) {
+    Logger.log("LOG [" + status + "] [" + run_type + "]: " + message);
+    return;
+  }
+
+  var end_time = new Date();
+  var duration_sec = ((end_time.getTime() - start_time.getTime()) / 1000).toFixed(2);
+
+  // Insert new row right below header (row 2) — newest log at top
+  log_sheet.insertRowBefore(2);
+
+  var log_values = [
+    end_time,
+    status,
+    run_type,
+    message,
+    source_url || "",
+    Number(duration_sec)
+  ];
+  log_sheet.getRange(2, 1, 1, log_values.length).setValues([log_values]);
+
+  // Color-code the Status cell
+  var status_color = CONFIG.log_status_colors[status] || "#6e7781";
+  log_sheet.getRange(2, 2).setFontColor(status_color).setFontWeight("bold");
+
+  // Color-code the Run Type cell
+  var type_color = CONFIG.log_run_type_colors[run_type] || "#6e7781";
+  log_sheet.getRange(2, 3).setFontColor(type_color).setFontWeight("bold");
+
+  // Trim old rows beyond max_log_rows
+  trim_log_sheet_(log_sheet);
+}
+
+
+function trim_log_sheet_(log_sheet) {
+  var max_total = CONFIG.max_log_rows + 1;
+  var last_row = log_sheet.getLastRow();
+  if (last_row > max_total) {
+    log_sheet.deleteRows(max_total + 1, last_row - max_total);
+  }
+}
+
+
+/* -------- NUMBER FORMATS & COLORS (unchanged) -------- */
 function apply_number_formats_(sheet, row) {
-  // Columns: 3..7 contain numeric fields (prices + ratio)
-  sheet.getRange(row, 3).setNumberFormat(CONFIG.number_formats.price_no_decimals); // gold tola
-  sheet.getRange(row, 4).setNumberFormat(CONFIG.number_formats.price_no_decimals); // silver tola
-  sheet.getRange(row, 5).setNumberFormat(CONFIG.number_formats.price_no_decimals); // gold 10g
-  sheet.getRange(row, 6).setNumberFormat(CONFIG.number_formats.price_no_decimals); // silver 10g
-  sheet.getRange(row, 7).setNumberFormat(CONFIG.number_formats.ratio_no_decimals); // ratio
+  sheet.getRange(row, 3).setNumberFormat(CONFIG.number_formats.price_no_decimals);
+  sheet.getRange(row, 4).setNumberFormat(CONFIG.number_formats.price_no_decimals);
+  sheet.getRange(row, 5).setNumberFormat(CONFIG.number_formats.price_no_decimals);
+  sheet.getRange(row, 6).setNumberFormat(CONFIG.number_formats.price_no_decimals);
+  sheet.getRange(row, 7).setNumberFormat(CONFIG.number_formats.ratio_no_decimals);
 }
 
 
 function apply_change_font_colors_(sheet, current_row, previous_row) {
-  // Compare these columns: gold_tola=3, silver_tola=4, gold_10g=5, silver_10g=6, ratio=7
   var cols = [3, 4, 5, 6, 7];
 
   for (var i = 0; i < cols.length; i++) {
@@ -147,7 +284,6 @@ function apply_change_font_colors_(sheet, current_row, previous_row) {
 
     var color = CONFIG.change_colors.same;
 
-    // If previous is missing or non-numeric, use neutral
     if (!isNaN(current_num) && !isNaN(previous_num)) {
       if (current_num > previous_num) color = CONFIG.change_colors.up;
       else if (current_num < previous_num) color = CONFIG.change_colors.down;
@@ -160,7 +296,6 @@ function apply_change_font_colors_(sheet, current_row, previous_row) {
 
 
 function set_neutral_font_colors_(sheet, row) {
-  // Set numeric columns to neutral color
   sheet.getRange(row, 3, 1, 5).setFontColor(CONFIG.change_colors.same);
 }
 
@@ -171,13 +306,11 @@ function ensure_rates_sheet_(ss, sheet_name) {
 
   var header_row = CONFIG.header_row_number;
 
-  // If empty, write headers
   if (sheet.getLastRow() === 0) {
     sheet.getRange(header_row, 1, 1, CONFIG.headers.length).setValues([CONFIG.headers]);
     return sheet;
   }
 
-  // If header size differs, rewrite headers to match config
   var existing = sheet.getRange(header_row, 1, 1, sheet.getLastColumn()).getValues()[0];
   if (existing.length !== CONFIG.headers.length) {
     sheet.getRange(header_row, 1, 1, CONFIG.headers.length).setValues([CONFIG.headers]);
@@ -418,14 +551,14 @@ function log_debug_snippet_(html) {
 function ensure_daily_trigger_() {
   var triggers = ScriptApp.getProjectTriggers();
   var triggerExists = false;
-  
+
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === "update_gold_silver_prices") {
       triggerExists = true;
       break;
     }
   }
-  
+
   if (!triggerExists) {
     create_daily_trigger_();
   }
@@ -433,7 +566,6 @@ function ensure_daily_trigger_() {
 
 
 function create_daily_trigger_() {
-  // Deletes existing triggers for update_gold_silver_prices, then creates a new one
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === "update_gold_silver_prices") {
